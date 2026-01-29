@@ -1,31 +1,10 @@
 #!/bin/bash -eux
 
 KUBE_VERSION="v1.35"
-CALICO_VERSION="v3.31.3"
+NVIDIA_DRIVER_VERSION="580"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-
-if lspci | grep -i nvidia; then
-    # We pin to the specific kernel version to avoid
-    # installing a newer kernel and having to reboot
-    apt install -y \
-        linux-headers-$(uname -r) \
-        linux-modules-nvidia-580-server-$(uname -r) \
-        nvidia-utils-580-server \
-        curl \
-        gnupg
-        
-    mkdir -p /etc/apt/keyrings
-    
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor > /etc/apt/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed "s#deb https://#deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    
-    apt update
-    apt -y install nvidia-container-toolkit
-    nvidia-ctk runtime configure --runtime=containerd --nvidia-set-as-default
-    systemctl restart containerd
-fi
 
 swapoff -a
 
@@ -62,7 +41,29 @@ containerd config default | tee /etc/containerd/config.toml
 sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/' /etc/containerd/config.toml
 systemctl restart containerd
 
-# isntall kubeadm, kubelet and kubectl
+# install nvidia drivers and container toolkit if NVIDIA GPU is present
+if lspci | grep -i nvidia; then
+    # We pin to the specific kernel version to avoid
+    # installing a newer kernel and having to reboot
+    apt install -y \
+        linux-headers-$(uname -r) \
+        linux-modules-nvidia-$NVIDIA_DRIVER_VERSION-server-$(uname -r) \
+        nvidia-utils-$NVIDIA_DRIVER_VERSION-server \
+        curl \
+        gnupg
+        
+    mkdir -p /etc/apt/keyrings
+    
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor > /etc/apt/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed "s#deb https://#deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    
+    apt update
+    apt -y install nvidia-container-toolkit
+    nvidia-ctk runtime configure --runtime=containerd --nvidia-set-as-default
+    systemctl restart containerd
+fi
+
+# install kubeadm, kubelet and kubectl
 curl -fsSL https://pkgs.k8s.io/core:/stable:/$KUBE_VERSION/deb/Release.key | gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
 tee /etc/apt/sources.list.d/kubernetes.list <<EOF
 deb [arch=amd64 signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/$KUBE_VERSION/deb/ /

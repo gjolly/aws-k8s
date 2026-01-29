@@ -209,9 +209,13 @@ def wait_for_cloud_init(host, key_path):
     
     # Use --wait flag to block until cloud-init is done
     stdin, stdout, stderr = ssh.exec_command('cloud-init status --wait')
-    stdout.channel.recv_exit_status()  # Wait for command to complete
+    exit_status = stdout.channel.recv_exit_status()  # Wait for command to complete
     
-    print(f"Cloud-init completed on {host}")
+    if exit_status != 0:
+        error_output = stderr.read().decode().strip()
+        ssh.close()
+        raise RuntimeError(f"cloud-init failed on {host} with exit code {exit_status}: {error_output}")
+    
     ssh.close()
 
 def get_join_command(main_ip, key_path):
