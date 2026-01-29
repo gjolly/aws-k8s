@@ -46,17 +46,17 @@ if lspci | grep -i nvidia; then
     # We pin to the specific kernel version to avoid
     # installing a newer kernel and having to reboot
     apt install -y \
-        linux-headers-$(uname -r) \
-        linux-modules-nvidia-$NVIDIA_DRIVER_VERSION-server-$(uname -r) \
+        "linux-headers-$(uname -r)" \
+        "linux-modules-nvidia-$NVIDIA_DRIVER_VERSION-server-$(uname -r)" \
         nvidia-utils-$NVIDIA_DRIVER_VERSION-server \
         curl \
         gnupg
-        
+
     mkdir -p /etc/apt/keyrings
-    
+
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor > /etc/apt/keyrings/nvidia-container-toolkit-keyring.gpg
     curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed "s#deb https://#deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    
+
     apt update
     apt -y install nvidia-container-toolkit
     nvidia-ctk runtime configure --runtime=containerd --nvidia-set-as-default
