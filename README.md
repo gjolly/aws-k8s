@@ -50,7 +50,7 @@ kubectl get nodes "-o=custom-columns=NAME:.metadata.name,GPU:.status.allocatable
 
 You can test that everything is working by running a GPU workload, for example this CUDA vector addition sample:
 
-```bash
+```yaml
 apiVersion: v1
 kind: Pod
 metadata:
