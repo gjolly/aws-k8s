@@ -16,11 +16,10 @@ the cluster config file is like this:
   "key_name": "YOUR_KEY_NAME",
   "key_path": "PATH_TO_YOU_PRIVATE_KEY",
   "vpc_cidr_block": "172.31.128.0/20",
-  "main_instance_type": "t3.medium",
-  "worker_instance_type": "t3.small",
-  "gpu_instance_type": "g6.xlarge",
-  "num_gpu_workers": 0,
-  "num_cpu_workers": 2
+  "nodes": {
+    "t3.medium": {"count": 1, "bootstrap": true},
+    "t3.small": {"count": 2}
+  }
 }
 ```
 

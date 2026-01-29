@@ -393,11 +393,20 @@ def create_cluster(cluster_name, config_file):
     key_name = config["key_name"]
     key_path = config["key_path"]
     vpc_cidr_block = config["vpc_cidr_block"]
-    main_instance_type = config["main_instance_type"]
-    worker_instance_type = config["worker_instance_type"]
-    gpu_instance_type = config["gpu_instance_type"]
-    num_gpu_workers = config["num_gpu_workers"]
-    num_cpu_workers = config["num_cpu_workers"]
+    nodes_config = config["nodes"]
+
+    # Find bootstrap node
+    bootstrap_instance_type = None
+    for instance_type, node_config in nodes_config.items():
+        if node_config.get("bootstrap", False):
+            if bootstrap_instance_type is not None:
+                logger.error("Multiple bootstrap nodes specified in configuration")
+                sys.exit(1)
+            bootstrap_instance_type = instance_type
+
+    if bootstrap_instance_type is None:
+        logger.error("No bootstrap node specified in configuration")
+        sys.exit(1)
 
     ec2 = boto3.client("ec2", region_name=region)
     ssm = boto3.client("ssm", region_name=region)
@@ -405,7 +414,12 @@ def create_cluster(cluster_name, config_file):
     # Load existing resources if available
     resources = load_resources(cluster_name)
     if resources is None:
-        resources = {"created_at": datetime.now().isoformat(), "region": region, "cluster_name": cluster_name}
+        resources = {
+            "created_at": datetime.now().isoformat(),
+            "region": region,
+            "cluster_name": cluster_name,
+            "nodes": {},
+        }
 
     # Get AMI ID from SSM
     ami_id = get_ami_id(ssm, ami_ssm_parameter)
@@ -423,20 +437,22 @@ def create_cluster(cluster_name, config_file):
 
     # Launch instances in parallel (skip already created ones)
     logger.info("Launching instances")
-    total_workers = num_gpu_workers + num_cpu_workers
-    max_workers = total_workers + 1  # +1 for main node
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # Calculate total number of nodes
+    total_nodes = sum(node_config["count"] for node_config in nodes_config.values())
+
+    with ThreadPoolExecutor(max_workers=total_nodes) as executor:
         futures = {}
+        node_index = 0  # Global node index for naming
 
-        # Launch main node if not exists
-        if "main_node" not in resources:
+        # Launch bootstrap node first (as main node)
+        if "main_node" not in resources.get("nodes", {}):
             futures[
                 executor.submit(
                     launch_spot_instance,
                     ec2,
                     "k8s-main",
-                    main_instance_type,
+                    bootstrap_instance_type,
                     subnet_id,
                     sg_id,
                     main_user_data,
@@ -447,58 +463,46 @@ def create_cluster(cluster_name, config_file):
         else:
             logger.info("Main node already exists, skipping")
 
-        # Launch GPU workers
-        for i in range(num_gpu_workers):
-            node_key = f"gpu_worker_{i}"
-            if node_key not in resources:
-                name = f"k8s-gpu-worker-{i + 1}" if num_gpu_workers > 1 else "k8s-gpu-worker"
-                futures[
-                    executor.submit(
-                        launch_spot_instance,
-                        ec2,
-                        name,
-                        gpu_instance_type,
-                        subnet_id,
-                        sg_id,
-                        worker_user_data,
-                        ami_id,
-                        key_name,
-                    )
-                ] = node_key
-            else:
-                logger.info(f"GPU worker {i + 1} already exists, skipping")
+        for instance_type, node_config in nodes_config.items():
+            count = node_config["count"]
+            if instance_type == bootstrap_instance_type:
+                count -= 1
+                if count <= 0:
+                    continue
 
-        # Launch CPU workers
-        for i in range(num_cpu_workers):
-            node_key = f"cpu_worker_{i}"
-            if node_key not in resources:
-                name = f"k8s-cpu-worker-{i + 1}" if num_cpu_workers > 1 else "k8s-cpu-worker"
-                futures[
-                    executor.submit(
-                        launch_spot_instance,
-                        ec2,
-                        name,
-                        worker_instance_type,
-                        subnet_id,
-                        sg_id,
-                        worker_user_data,
-                        ami_id,
-                        key_name,
-                    )
-                ] = node_key
-            else:
-                logger.info(f"CPU worker {i + 1} already exists, skipping")
+            for i in range(count):
+                node_key = f"node_{node_index}"
+                if node_key not in resources.get("nodes", {}):
+                    # Sanitize instance type for naming (replace dots with dashes)
+                    instance_type_clean = instance_type.replace(".", "-")
+                    name = f"k8s-{instance_type_clean}-{i}" if count > 1 else f"k8s-{instance_type_clean}"
+                    futures[
+                        executor.submit(
+                            launch_spot_instance,
+                            ec2,
+                            name,
+                            instance_type,
+                            subnet_id,
+                            sg_id,
+                            worker_user_data,
+                            ami_id,
+                            key_name,
+                        )
+                    ] = node_key
+                else:
+                    logger.info(f"Node {node_key} already exists, skipping")
+                node_index += 1
 
         for future in as_completed(futures):
             node_name = futures[future]
             try:
-                resources[node_name] = future.result()
+                resources["nodes"][node_name] = future.result()
                 save_resources(cluster_name, resources)  # Save after each instance is created
             except Exception as e:
                 logger.error(f"Failed to launch {node_name}: {e}")
                 sys.exit(1)
 
-    main_node = resources["main_node"]
+    main_node = resources["nodes"]["main_node"]
 
     # Wait for main node to be ready
     wait_for_ssh(main_node["public_ip"], key_path)
@@ -509,10 +513,12 @@ def create_cluster(cluster_name, config_file):
 
     # Wait for workers and join them
     workers = []
-    for i in range(num_gpu_workers):
-        workers.append((f"GPU worker {i + 1}", resources[f"gpu_worker_{i}"], f"gpu_worker_{i}_joined"))
-    for i in range(num_cpu_workers):
-        workers.append((f"CPU worker {i + 1}", resources[f"cpu_worker_{i}"], f"cpu_worker_{i}_joined"))
+    # Collect all worker nodes (all nodes except main_node)
+    worker_index = 0
+    for key, node in resources["nodes"].items():
+        if key != "main_node":
+            workers.append((f"Worker {worker_index + 1}", node, f"{key}_joined"))
+            worker_index += 1
 
     for worker_name, worker, joined_key in workers:
         if not resources.get(joined_key, False):
@@ -534,10 +540,12 @@ def create_cluster(cluster_name, config_file):
 
     logger.info("Cluster provisioned successfully!")
     logger.info(f"Main node: {main_node['public_ip']}")
-    for i in range(num_gpu_workers):
-        logger.info(f"GPU worker {i + 1}: {resources[f'gpu_worker_{i}']['public_ip']}")
-    for i in range(num_cpu_workers):
-        logger.info(f"CPU worker {i + 1}: {resources[f'cpu_worker_{i}']['public_ip']}")
+    # List all worker nodes
+    worker_index = 0
+    for key in sorted(resources["nodes"].keys()):
+        if key != "main_node":
+            logger.info(f"Worker {worker_index + 1}: {resources['nodes'][key]['public_ip']}")
+            worker_index += 1
 
 
 def delete_cluster(cluster_name):
@@ -567,12 +575,12 @@ def delete_cluster(cluster_name):
     instance_ids = []
     spot_request_ids = []
 
-    # Collect instance and spot request IDs
-    for key, value in resources.items():
-        if isinstance(value, dict) and "instance_id" in value:
-            instance_ids.append(value["instance_id"])
-            if "spot_request_id" in value:
-                spot_request_ids.append(value["spot_request_id"])
+    # Collect instance and spot request IDs from nodes
+    for node_name, node in resources.get("nodes", {}).items():
+        if "instance_id" in node:
+            instance_ids.append(node["instance_id"])
+            if "spot_request_id" in node:
+                spot_request_ids.append(node["spot_request_id"])
 
     # Terminate instances
     if instance_ids:
@@ -598,6 +606,7 @@ def delete_cluster(cluster_name):
             logger.info("Security group deleted")
         except Exception as e:
             logger.warning(f"Could not delete security group: {e}")
+            sys.exit(1)
 
     # Delete subnet
     if "subnet_id" in resources:
@@ -608,6 +617,7 @@ def delete_cluster(cluster_name):
             logger.info("Subnet deleted")
         except Exception as e:
             logger.warning(f"Could not delete subnet: {e}")
+            sys.exit(1)
 
     # Delete entire cluster directory (includes kubeconfig and resource file)
     import shutil
@@ -637,7 +647,7 @@ def show_clusters():
 
         created_at = resources.get("created_at", "Unknown")
         region = resources.get("region", "Unknown")
-        main_ip = resources.get("main_node", {}).get("public_ip", "N/A")
+        main_ip = resources.get("nodes", {}).get("main_node", {}).get("public_ip", "N/A")
 
         print(f"  • {cluster_name}")
         print(f"    Created: {created_at}")
