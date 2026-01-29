@@ -3,7 +3,7 @@
 To deploy the cluster:
 
 ```bash
-uv run aws-k8s create --config-file cluster-config.json
+uv run aws-k8s create --config-file cluster-config.json my-cluster
 ```
 
 the cluster config file is like this:
@@ -29,7 +29,26 @@ Cluster info is stored in `cluster-resources.json` after creation.
 To delete the cluster:
 
 ```bash
-uv run aws-k8s delete --config-file cluster-config.json
+uv run aws-k8s delete my-cluster
+```
+
+Full usage info:
+
+```bash
+usage: aws-k8s [-h] {create,delete,list,kubeconfig} ...
+
+Manage Kubernetes cluster on AWS
+
+positional arguments:
+  {create,delete,list,kubeconfig}
+                        Available commands
+    create              Create a new cluster
+    delete              Delete an existing cluster
+    list                List all clusters
+    kubeconfig          Print path to kubeconfig file for a cluster
+
+options:
+  -h, --help            show this help message and exit
 ```
 
 ## GPU Support

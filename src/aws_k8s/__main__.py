@@ -24,6 +24,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from importlib.resources import files
+from pathlib import Path
 
 import boto3
 import paramiko
@@ -35,6 +36,43 @@ logger = logging.getLogger(__name__)
 # Configuration files
 DEFAULT_CONFIG_FILE = "cluster-config.json"
 RESOURCE_FILE = "cluster-resources.json"
+KUBECONFIG_FILE = "kubeconfig"
+
+
+def get_data_dir():
+    """Get the data directory following XDG Base Directory specification"""
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home) / "aws-k8s"
+    return Path.home() / ".local" / "share" / "aws-k8s"
+
+
+def get_cluster_dir(cluster_name):
+    """Get the directory for a specific cluster"""
+    cluster_dir = get_data_dir() / cluster_name
+    return cluster_dir
+
+
+def ensure_cluster_dir(cluster_name):
+    """Ensure the cluster directory exists"""
+    cluster_dir = get_cluster_dir(cluster_name)
+    cluster_dir.mkdir(parents=True, exist_ok=True)
+    return cluster_dir
+
+
+def list_clusters():
+    """List all available clusters"""
+    data_dir = get_data_dir()
+    if not data_dir.exists():
+        return []
+
+    clusters = []
+    for item in data_dir.iterdir():
+        if item.is_dir():
+            resource_file = item / RESOURCE_FILE
+            if resource_file.exists():
+                clusters.append(item.name)
+    return clusters
 
 
 def load_config(config_file):
@@ -287,24 +325,30 @@ def join_worker_to_cluster(worker_ip, key_path, join_command):
     ssh.close()
 
 
-def load_resources():
+def load_resources(cluster_name):
     """Load existing resources from JSON file if it exists"""
-    if os.path.exists(RESOURCE_FILE):
-        with open(RESOURCE_FILE) as f:
+    cluster_dir = get_cluster_dir(cluster_name)
+    resource_file = cluster_dir / RESOURCE_FILE
+
+    if resource_file.exists():
+        with open(resource_file) as f:
             resources = json.load(f)
-        logger.info(f"Loaded existing resources from {RESOURCE_FILE}")
+        logger.info(f"Loaded existing resources from {resource_file}")
         return resources
     return None
 
 
-def save_resources(resources):
+def save_resources(cluster_name, resources):
     """Save resource IDs to JSON file"""
-    with open(RESOURCE_FILE, "w") as f:
+    cluster_dir = ensure_cluster_dir(cluster_name)
+    resource_file = cluster_dir / RESOURCE_FILE
+
+    with open(resource_file, "w") as f:
         json.dump(resources, f, indent=2)
-    logger.info(f"Resources saved to {RESOURCE_FILE}")
+    logger.debug(f"Resources saved to {resource_file}")
 
 
-def download_kubeconfig(main_ip, key_path, output_file="kubeconfig"):
+def download_kubeconfig(cluster_name, main_ip, key_path):
     """Download and configure kubeconfig from main node"""
     logger.info("Downloading kubeconfig")
     ssh = paramiko.SSHClient()
@@ -320,18 +364,27 @@ def download_kubeconfig(main_ip, key_path, output_file="kubeconfig"):
     # Replace internal IP with public IP using regex
     kubeconfig = re.sub(r"https://[0-9.]+:6443", f"https://{main_ip}:6443", kubeconfig)
 
-    # Save to file
+    # Save to cluster directory
+    cluster_dir = ensure_cluster_dir(cluster_name)
+    output_file = cluster_dir / KUBECONFIG_FILE
+
     with open(output_file, "w") as f:
         f.write(kubeconfig)
 
     logger.info(f"Kubeconfig saved to {output_file}")
     logger.info(f"You can now use: export KUBECONFIG={output_file}")
 
-    return output_file
+    return str(output_file)
 
 
-def create_cluster(config_file):
+def create_cluster(cluster_name, config_file):
     """Create a new Kubernetes cluster"""
+    # Check if cluster already exists
+    existing_clusters = list_clusters()
+    if cluster_name in existing_clusters:
+        logger.error(f"Cluster '{cluster_name}' already exists")
+        sys.exit(1)
+
     # Load configuration
     config = load_config(config_file)
     region = config["region"]
@@ -350,9 +403,9 @@ def create_cluster(config_file):
     ssm = boto3.client("ssm", region_name=region)
 
     # Load existing resources if available
-    resources = load_resources()
+    resources = load_resources(cluster_name)
     if resources is None:
-        resources = {"created_at": datetime.now().isoformat(), "region": region}
+        resources = {"created_at": datetime.now().isoformat(), "region": region, "cluster_name": cluster_name}
 
     # Get AMI ID from SSM
     ami_id = get_ami_id(ssm, ami_ssm_parameter)
@@ -362,7 +415,7 @@ def create_cluster(config_file):
     resources["vpc_id"] = vpc_id
     resources["subnet_id"] = subnet_id
     resources["security_group_id"] = sg_id
-    save_resources(resources)  # Save after VPC creation
+    save_resources(cluster_name, resources)  # Save after VPC creation
 
     # Read user data scripts
     main_user_data = read_user_data("user-data-main.sh")
@@ -440,7 +493,7 @@ def create_cluster(config_file):
             node_name = futures[future]
             try:
                 resources[node_name] = future.result()
-                save_resources(resources)  # Save after each instance is created
+                save_resources(cluster_name, resources)  # Save after each instance is created
             except Exception as e:
                 logger.error(f"Failed to launch {node_name}: {e}")
                 sys.exit(1)
@@ -467,15 +520,15 @@ def create_cluster(config_file):
             wait_for_cloud_init(worker["public_ip"], key_path)
             join_worker_to_cluster(worker["public_ip"], key_path, join_command)
             resources[joined_key] = True
-            save_resources(resources)  # Save after each worker joins
+            save_resources(cluster_name, resources)  # Save after each worker joins
         else:
             logger.info(f"{worker_name} already joined, skipping")
 
     # Download kubeconfig if not already done
     if "kubeconfig_file" not in resources:
-        kubeconfig_file = download_kubeconfig(main_node["public_ip"], key_path)
+        kubeconfig_file = download_kubeconfig(cluster_name, main_node["public_ip"], key_path)
         resources["kubeconfig_file"] = kubeconfig_file
-        save_resources(resources)
+        save_resources(cluster_name, resources)
     else:
         logger.info("Kubeconfig already downloaded, skipping")
 
@@ -487,14 +540,17 @@ def create_cluster(config_file):
         logger.info(f"CPU worker {i + 1}: {resources[f'cpu_worker_{i}']['public_ip']}")
 
 
-def delete_cluster():
+def delete_cluster(cluster_name):
     """Delete the Kubernetes cluster and all associated resources"""
-    if not os.path.exists(RESOURCE_FILE):
-        logger.error(f"{RESOURCE_FILE} not found. Nothing to delete")
+    cluster_dir = get_cluster_dir(cluster_name)
+    resource_file = cluster_dir / RESOURCE_FILE
+
+    if not resource_file.exists():
+        logger.error(f"Cluster '{cluster_name}' not found")
         sys.exit(1)
 
     # Load resources
-    with open(RESOURCE_FILE) as f:
+    with open(resource_file) as f:
         resources = json.load(f)
 
     # Get region from resources or config
@@ -505,7 +561,7 @@ def delete_cluster():
 
     ec2 = boto3.client("ec2", region_name=region)
 
-    logger.info("Deleting cluster resources")
+    logger.info(f"Deleting cluster '{cluster_name}' resources")
 
     # Terminate all instances without clean shutdown
     instance_ids = []
@@ -553,40 +609,88 @@ def delete_cluster():
         except Exception as e:
             logger.warning(f"Could not delete subnet: {e}")
 
-    # Delete kubeconfig file if it exists
-    if "kubeconfig_file" in resources:
-        kubeconfig = resources["kubeconfig_file"]
-        if os.path.exists(kubeconfig):
-            os.remove(kubeconfig)
-            logger.info(f"Deleted {kubeconfig}")
+    # Delete entire cluster directory (includes kubeconfig and resource file)
+    import shutil
 
-    # Delete resource file
-    if os.path.exists(RESOURCE_FILE):
-        os.remove(RESOURCE_FILE)
-        logger.info(f"Deleted {RESOURCE_FILE}")
+    if cluster_dir.exists():
+        shutil.rmtree(cluster_dir)
+        logger.info(f"Deleted cluster directory: {cluster_dir}")
 
-    logger.info("Cluster deleted successfully!")
+    logger.info(f"Cluster '{cluster_name}' deleted successfully!")
+
+
+def show_clusters():
+    """Show all available clusters"""
+    clusters = list_clusters()
+
+    if not clusters:
+        print("No clusters found")
+        return
+
+    print("Available clusters:")
+    for cluster_name in clusters:
+        cluster_dir = get_cluster_dir(cluster_name)
+        resource_file = cluster_dir / RESOURCE_FILE
+
+        with open(resource_file) as f:
+            resources = json.load(f)
+
+        created_at = resources.get("created_at", "Unknown")
+        region = resources.get("region", "Unknown")
+        main_ip = resources.get("main_node", {}).get("public_ip", "N/A")
+
+        print(f"  • {cluster_name}")
+        print(f"    Created: {created_at}")
+        print(f"    Region: {region}")
+        print(f"    Main node: {main_ip}")
+        print(f"    Kubeconfig: {cluster_dir / KUBECONFIG_FILE}")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Manage Kubernetes cluster on AWS", formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
-        "action",
-        choices=["create", "delete"],
-        help="Action to perform: create a new cluster or delete existing cluster",
-    )
 
-    parser.add_argument(
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Create command
+    create_parser = subparsers.add_parser("create", help="Create a new cluster")
+    create_parser.add_argument("name", help="Name of the cluster")
+    create_parser.add_argument(
         "--config", default=DEFAULT_CONFIG_FILE, help=f"Path to configuration file (default: {DEFAULT_CONFIG_FILE})"
     )
+
+    # Delete command
+    delete_parser = subparsers.add_parser("delete", help="Delete an existing cluster")
+    delete_parser.add_argument("name", help="Name of the cluster to delete")
+
+    # List command
+    subparsers.add_parser("list", help="List all clusters")
+
+    # Kubeconfig printer
+    kubeconfig_parser = subparsers.add_parser("kubeconfig", help="Print path to kubeconfig file for a cluster")
+    kubeconfig_parser.add_argument("name", help="Name of the cluster")
+
     args = parser.parse_args()
 
-    if args.action == "create":
-        create_cluster(args.config)
-    elif args.action == "delete":
-        delete_cluster()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.command == "create":
+        create_cluster(args.name, args.config)
+    elif args.command == "delete":
+        delete_cluster(args.name)
+    elif args.command == "list":
+        show_clusters()
+    elif args.command == "kubeconfig":
+        cluster_dir = get_cluster_dir(args.name)
+        kubeconfig_file = cluster_dir / KUBECONFIG_FILE
+        if kubeconfig_file.exists():
+            print(kubeconfig_file)
+        else:
+            logger.error(f"Kubeconfig for cluster '{args.name}' not found")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
