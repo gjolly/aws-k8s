@@ -2,4 +2,3 @@
 kubeconfig
 dist/
 __pycache__/
-*.lock
