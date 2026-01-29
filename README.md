@@ -3,7 +3,7 @@
 To deploy the cluster:
 
 ```bash
-uv run provision-cluster.py create --config cluster-config.json
+uv run aws-k8s create --config-file cluster-config.json
 ```
 
 the cluster config file is like this:
@@ -29,7 +29,7 @@ Cluster info is stored in `cluster-resources.json` after creation.
 To delete the cluster:
 
 ```bash
-uv run provision-cluster.py delete
+uv run aws-k8s delete --config-file cluster-config.json
 ```
 
 ## GPU Support

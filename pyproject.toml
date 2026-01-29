@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.scripts]
-provision-cluster = "aws_k8s.__main__:main"
+aws-k8s = "aws_k8s.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
