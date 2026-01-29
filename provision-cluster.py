@@ -16,8 +16,17 @@ import argparse
 import os
 import base64
 import re
+import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration files
 DEFAULT_CONFIG_FILE = 'cluster-config.json'
@@ -26,7 +35,7 @@ RESOURCE_FILE = 'cluster-resources.json'
 def load_config(config_file):
     """Load configuration from JSON file"""
     if not os.path.exists(config_file):
-        print(f"Error: {config_file} not found")
+        logger.error(f"Config file {config_file} not found")
         sys.exit(1)
     
     with open(config_file, 'r') as f:
@@ -38,10 +47,10 @@ def create_vpc_resources(ec2, region, vpc_cidr_block, allowed_ingress, existing_
     """Create VPC, subnet, internet gateway, and security group"""
     # Check if VPC resources already exist
     if existing_resources and 'vpc_id' in existing_resources and 'subnet_id' in existing_resources and 'security_group_id' in existing_resources:
-        print("VPC resources already exist, skipping creation...")
+        logger.info("VPC resources already exist, skipping creation")
         return existing_resources['vpc_id'], existing_resources['subnet_id'], existing_resources['security_group_id']
     
-    print("Creating VPC resources...")
+    logger.info("Creating VPC resources")
     
     # Get default VPC
     vpcs = ec2.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
@@ -54,14 +63,14 @@ def create_vpc_resources(ec2, region, vpc_cidr_block, allowed_ingress, existing_
         AvailabilityZone=f'{region}a'
     )
     subnet_id = subnet['Subnet']['SubnetId']
-    print(f"Created subnet: {subnet_id}")
+    logger.info(f"Created subnet: {subnet_id}")
     
     # Enable auto-assign public IP on subnet
     ec2.modify_subnet_attribute(
         SubnetId=subnet_id,
         MapPublicIpOnLaunch={'Value': True}
     )
-    print("Enabled auto-assign public IP on subnet")
+    logger.info("Enabled auto-assign public IP on subnet")
     
     # Create security group
     sg = ec2.create_security_group(
@@ -70,7 +79,7 @@ def create_vpc_resources(ec2, region, vpc_cidr_block, allowed_ingress, existing_
         VpcId=vpc_id
     )
     sg_id = sg['GroupId']
-    print(f"Created security group: {sg_id}")
+    logger.info(f"Created security group: {sg_id}")
     
     # Add security group rules
     ec2.authorize_security_group_ingress(
@@ -93,20 +102,20 @@ def read_user_data(filename):
         with open(filename, 'r') as f:
             return f.read()
     except FileNotFoundError:
-        print(f"Warning: {filename} not found, using empty user data")
+        logger.warning(f"{filename} not found, using empty user data")
         return ""
 
 def get_ami_id(ssm, ami_ssm_parameter):
     """Get AMI ID from SSM parameter"""
-    print(f"Fetching AMI ID from SSM...")
+    logger.info("Fetching AMI ID from SSM")
     response = ssm.get_parameter(Name=ami_ssm_parameter)
     ami_id = response['Parameter']['Value']
-    print(f"Using AMI: {ami_id}")
+    logger.info(f"Using AMI: {ami_id}")
     return ami_id
 
 def launch_spot_instance(ec2, name, instance_type, subnet_id, sg_id, user_data, ami_id, key_name):
     """Launch a spot instance"""
-    print(f"Launching {name} ({instance_type})...")
+    logger.info(f"Launching {name} ({instance_type})")
     
     # Base64 encode user data
     user_data_encoded = base64.b64encode(user_data.encode('utf-8')).decode('utf-8')
@@ -126,10 +135,10 @@ def launch_spot_instance(ec2, name, instance_type, subnet_id, sg_id, user_data, 
     )
     
     spot_request_id = response['SpotInstanceRequests'][0]['SpotInstanceRequestId']
-    print(f"Spot request created: {spot_request_id}")
+    logger.info(f"Spot request created: {spot_request_id}")
     
     # Wait for spot request to be fulfilled
-    print("Waiting for spot request fulfillment...")
+    logger.info("Waiting for spot request fulfillment")
     while True:
         requests = ec2.describe_spot_instance_requests(
             SpotInstanceRequestIds=[spot_request_id]
@@ -138,16 +147,16 @@ def launch_spot_instance(ec2, name, instance_type, subnet_id, sg_id, user_data, 
         
         if status == 'fulfilled':
             instance_id = requests['SpotInstanceRequests'][0]['InstanceId']
-            print(f"Instance {instance_id} launched")
+            logger.info(f"Instance {instance_id} launched")
             break
         elif status in ['price-too-low', 'canceled-before-fulfillment', 'bad-parameters']:
-            print(f"Spot request failed: {status}")
+            logger.error(f"Spot request failed: {status}")
             sys.exit(1)
         
         time.sleep(5)
     
     # Wait for instance to be running
-    print("Waiting for instance to be running...")
+    logger.info("Waiting for instance to be running")
     waiter = ec2.get_waiter('instance_running')
     waiter.wait(InstanceIds=[instance_id])
     
@@ -156,10 +165,10 @@ def launch_spot_instance(ec2, name, instance_type, subnet_id, sg_id, user_data, 
         Resources=[instance_id],
         Tags=[{'Key': 'Name', 'Value': name}]
     )
-    print(f"Tagged instance {instance_id} with name {name}")
+    logger.info(f"Tagged instance {instance_id} with name {name}")
     
     # Get instance details and wait for public IP assignment
-    print("Waiting for public IP assignment...")
+    logger.info("Waiting for public IP assignment")
     public_ip = None
     for attempt in range(30):  # Try for up to 30 seconds
         instances = ec2.describe_instances(InstanceIds=[instance_id])
@@ -167,13 +176,13 @@ def launch_spot_instance(ec2, name, instance_type, subnet_id, sg_id, user_data, 
         public_ip = instance.get('PublicIpAddress')
         
         if public_ip:
-            print(f"Public IP assigned: {public_ip}")
+            logger.info(f"Public IP assigned: {public_ip}")
             break
         
         time.sleep(1)
     
     if not public_ip:
-        print(f"Warning: No public IP assigned to {instance_id}")
+        logger.warning(f"No public IP assigned to {instance_id}")
     
     return {
         'spot_request_id': spot_request_id,
@@ -184,7 +193,7 @@ def launch_spot_instance(ec2, name, instance_type, subnet_id, sg_id, user_data, 
 
 def wait_for_ssh(host, key_path, timeout=300):
     """Wait for SSH to become available"""
-    print(f"Waiting for SSH on {host}...")
+    logger.info(f"Waiting for SSH on {host}")
     start_time = time.time()
     
     while time.time() - start_time < timeout:
@@ -193,7 +202,7 @@ def wait_for_ssh(host, key_path, timeout=300):
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(host, username='ubuntu', key_filename=key_path, timeout=5)
             ssh.close()
-            print(f"SSH available on {host}")
+            logger.info(f"SSH available on {host}")
             return True
         except Exception:
             time.sleep(5)
@@ -202,7 +211,7 @@ def wait_for_ssh(host, key_path, timeout=300):
 
 def wait_for_cloud_init(host, key_path):
     """Wait for cloud-init to complete"""
-    print(f"Waiting for cloud-init on {host}...")
+    logger.info(f"Waiting for cloud-init on {host}")
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(host, username='ubuntu', key_filename=key_path)
@@ -213,14 +222,28 @@ def wait_for_cloud_init(host, key_path):
     
     if exit_status != 0:
         error_output = stderr.read().decode().strip()
+        logger.error(f"cloud-init failed on {host} with exit code {exit_status}: {error_output}")
         ssh.close()
-        raise RuntimeError(f"cloud-init failed on {host} with exit code {exit_status}: {error_output}")
+        raise RuntimeError(f"cloud-init failed on {host}")
+    
+    # Check the actual status
+    stdin, stdout, stderr = ssh.exec_command('cloud-init status')
+    status_output = stdout.read().decode().strip()
+    
+    if 'status: done' in status_output:
+        logger.info(f"Cloud-init completed successfully on {host}")
+    elif 'status: error' in status_output:
+        logger.error(f"Cloud-init failed on {host}: {status_output}")
+        ssh.close()
+        raise RuntimeError(f"Cloud-init failed on {host}")
+    else:
+        logger.info(f"Cloud-init finished on {host} with status: {status_output}")
     
     ssh.close()
 
 def get_join_command(main_ip, key_path):
     """Get kubeadm join command from main node"""
-    print("Getting kubeadm join command...")
+    logger.info("Getting kubeadm join command")
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(main_ip, username='ubuntu', key_filename=key_path)
@@ -233,7 +256,7 @@ def get_join_command(main_ip, key_path):
 
 def join_worker_to_cluster(worker_ip, key_path, join_command):
     """Join worker node to the cluster"""
-    print(f"Joining worker {worker_ip} to cluster...")
+    logger.info(f"Joining worker {worker_ip} to cluster")
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(worker_ip, username='ubuntu', key_filename=key_path)
@@ -241,7 +264,7 @@ def join_worker_to_cluster(worker_ip, key_path, join_command):
     stdin, stdout, stderr = ssh.exec_command(f'sudo {join_command}')
     stdout.channel.recv_exit_status()  # Wait for command to complete
     
-    print(f"Worker {worker_ip} joined successfully")
+    logger.info(f"Worker {worker_ip} joined successfully")
     ssh.close()
 
 def load_resources():
@@ -249,7 +272,7 @@ def load_resources():
     if os.path.exists(RESOURCE_FILE):
         with open(RESOURCE_FILE, 'r') as f:
             resources = json.load(f)
-        print(f"Loaded existing resources from {RESOURCE_FILE}")
+        logger.info(f"Loaded existing resources from {RESOURCE_FILE}")
         return resources
     return None
 
@@ -257,11 +280,11 @@ def save_resources(resources):
     """Save resource IDs to JSON file"""
     with open(RESOURCE_FILE, 'w') as f:
         json.dump(resources, f, indent=2)
-    print(f"Resources saved to {RESOURCE_FILE}")
+    logger.info(f"Resources saved to {RESOURCE_FILE}")
 
 def download_kubeconfig(main_ip, key_path, output_file='kubeconfig'):
     """Download and configure kubeconfig from main node"""
-    print("Downloading kubeconfig...")
+    logger.info("Downloading kubeconfig")
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(main_ip, username='ubuntu', key_filename=key_path)
@@ -279,8 +302,8 @@ def download_kubeconfig(main_ip, key_path, output_file='kubeconfig'):
     with open(output_file, 'w') as f:
         f.write(kubeconfig)
     
-    print(f"Kubeconfig saved to {output_file}")
-    print(f"You can now use: export KUBECONFIG={output_file}")
+    logger.info(f"Kubeconfig saved to {output_file}")
+    logger.info(f"You can now use: export KUBECONFIG={output_file}")
     
     return output_file
 
@@ -326,7 +349,7 @@ def create_cluster(config_file):
     worker_user_data = read_user_data('user-data-worker.sh')
     
     # Launch instances in parallel (skip already created ones)
-    print("Launching instances...")
+    logger.info("Launching instances")
     total_workers = num_gpu_workers + num_cpu_workers
     max_workers = total_workers + 1  # +1 for main node
     
@@ -337,7 +360,7 @@ def create_cluster(config_file):
         if 'main_node' not in resources:
             futures[executor.submit(launch_spot_instance, ec2, 'k8s-main', main_instance_type, subnet_id, sg_id, main_user_data, ami_id, key_name)] = 'main_node'
         else:
-            print("Main node already exists, skipping...")
+            logger.info("Main node already exists, skipping")
         
         # Launch GPU workers
         for i in range(num_gpu_workers):
@@ -346,7 +369,7 @@ def create_cluster(config_file):
                 name = f'k8s-gpu-worker-{i+1}' if num_gpu_workers > 1 else 'k8s-gpu-worker'
                 futures[executor.submit(launch_spot_instance, ec2, name, gpu_instance_type, subnet_id, sg_id, worker_user_data, ami_id, key_name)] = node_key
             else:
-                print(f"GPU worker {i+1} already exists, skipping...")
+                logger.info(f"GPU worker {i+1} already exists, skipping")
         
         # Launch CPU workers
         for i in range(num_cpu_workers):
@@ -355,7 +378,7 @@ def create_cluster(config_file):
                 name = f'k8s-cpu-worker-{i+1}' if num_cpu_workers > 1 else 'k8s-cpu-worker'
                 futures[executor.submit(launch_spot_instance, ec2, name, worker_instance_type, subnet_id, sg_id, worker_user_data, ami_id, key_name)] = node_key
             else:
-                print(f"CPU worker {i+1} already exists, skipping...")
+                logger.info(f"CPU worker {i+1} already exists, skipping")
         
         for future in as_completed(futures):
             node_name = futures[future]
@@ -363,7 +386,7 @@ def create_cluster(config_file):
                 resources[node_name] = future.result()
                 save_resources(resources)  # Save after each instance is created
             except Exception as e:
-                print(f"Failed to launch {node_name}: {e}")
+                logger.error(f"Failed to launch {node_name}: {e}")
                 sys.exit(1)
     
     main_node = resources['main_node']
@@ -390,7 +413,7 @@ def create_cluster(config_file):
             resources[joined_key] = True
             save_resources(resources)  # Save after each worker joins
         else:
-            print(f"{worker_name} already joined, skipping...")
+            logger.info(f"{worker_name} already joined, skipping")
     
     # Download kubeconfig if not already done
     if 'kubeconfig_file' not in resources:
@@ -398,19 +421,19 @@ def create_cluster(config_file):
         resources['kubeconfig_file'] = kubeconfig_file
         save_resources(resources)
     else:
-        print("Kubeconfig already downloaded, skipping...")
+        logger.info("Kubeconfig already downloaded, skipping")
     
-    print("\nCluster provisioned successfully!")
-    print(f"Main node: {main_node['public_ip']}")
+    logger.info("Cluster provisioned successfully!")
+    logger.info(f"Main node: {main_node['public_ip']}")
     for i in range(num_gpu_workers):
-        print(f"GPU worker {i+1}: {resources[f'gpu_worker_{i}']['public_ip']}")
+        logger.info(f"GPU worker {i+1}: {resources[f'gpu_worker_{i}']['public_ip']}")
     for i in range(num_cpu_workers):
-        print(f"CPU worker {i+1}: {resources[f'cpu_worker_{i}']['public_ip']}")
+        logger.info(f"CPU worker {i+1}: {resources[f'cpu_worker_{i}']['public_ip']}")
 
 def delete_cluster():
     """Delete the Kubernetes cluster and all associated resources"""
     if not os.path.exists(RESOURCE_FILE):
-        print(f"Error: {RESOURCE_FILE} not found. Nothing to delete.")
+        logger.error(f"{RESOURCE_FILE} not found. Nothing to delete")
         sys.exit(1)
     
     # Load resources
@@ -420,12 +443,12 @@ def delete_cluster():
     # Get region from resources or config
     region = resources.get('region')
     if not region:
-        print("Error: Region not found in resources. Using region from config.")
+        logger.error("Region not found in resources")
         sys.exit(1)
     
     ec2 = boto3.client('ec2', region_name=region)
     
-    print("Deleting cluster resources...")
+    logger.info("Deleting cluster resources")
     
     # Terminate all instances without clean shutdown
     instance_ids = []
@@ -440,52 +463,52 @@ def delete_cluster():
     
     # Terminate instances
     if instance_ids:
-        print(f"Terminating instances: {', '.join(instance_ids)}")
+        logger.info(f"Terminating instances: {', '.join(instance_ids)}")
         ec2.terminate_instances(InstanceIds=instance_ids)
-        print("Waiting for instances to terminate...")
+        logger.info("Waiting for instances to terminate")
         waiter = ec2.get_waiter('instance_terminated')
         waiter.wait(InstanceIds=instance_ids)
-        print("Instances terminated")
+        logger.info("Instances terminated")
     
     # Cancel spot requests
     if spot_request_ids:
-        print(f"Canceling spot requests: {', '.join(spot_request_ids)}")
+        logger.info(f"Canceling spot requests: {', '.join(spot_request_ids)}")
         ec2.cancel_spot_instance_requests(SpotInstanceRequestIds=spot_request_ids)
-        print("Spot requests canceled")
+        logger.info("Spot requests canceled")
     
     # Delete security group
     if 'security_group_id' in resources:
         sg_id = resources['security_group_id']
-        print(f"Deleting security group: {sg_id}")
+        logger.info(f"Deleting security group: {sg_id}")
         try:
             ec2.delete_security_group(GroupId=sg_id)
-            print("Security group deleted")
+            logger.info("Security group deleted")
         except Exception as e:
-            print(f"Warning: Could not delete security group: {e}")
+            logger.warning(f"Could not delete security group: {e}")
     
     # Delete subnet
     if 'subnet_id' in resources:
         subnet_id = resources['subnet_id']
-        print(f"Deleting subnet: {subnet_id}")
+        logger.info(f"Deleting subnet: {subnet_id}")
         try:
             ec2.delete_subnet(SubnetId=subnet_id)
-            print("Subnet deleted")
+            logger.info("Subnet deleted")
         except Exception as e:
-            print(f"Warning: Could not delete subnet: {e}")
+            logger.warning(f"Could not delete subnet: {e}")
     
     # Delete kubeconfig file if it exists
     if 'kubeconfig_file' in resources:
         kubeconfig = resources['kubeconfig_file']
         if os.path.exists(kubeconfig):
             os.remove(kubeconfig)
-            print(f"Deleted {kubeconfig}")
+            logger.info(f"Deleted {kubeconfig}")
     
     # Delete resource file
     if os.path.exists(RESOURCE_FILE):
         os.remove(RESOURCE_FILE)
-        print(f"Deleted {RESOURCE_FILE}")
+        logger.info(f"Deleted {RESOURCE_FILE}")
     
-    print("\nCluster deleted successfully!")
+    logger.info("Cluster deleted successfully!")
 
 def main():
     parser = argparse.ArgumentParser(
