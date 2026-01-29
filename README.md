@@ -82,6 +82,33 @@ To schedule a pod with GPU resources, you need to:
 
 **Important**: GPU allocation is exclusive by default. A pod requesting `nvidia.com/gpu: 1` will get exclusive access to one entire GPU. Other pods requesting GPUs will remain in Pending state until a GPU becomes available. To enable GPU sharing between multiple pods, you would need to configure additional features like NVIDIA MPS, MIG, or time-slicing in the device plugin configuration.
 
+## Development
+
+### Setting up pre-commit hooks
+
+This project uses pre-commit hooks to ensure code quality and consistency. To set up the hooks for local development:
+
+```bash
+# Install development dependencies
+uv sync --dev
+
+# Install the pre-commit hooks
+uv run prek install
+```
+
+The hooks will now run automatically on every commit, performing:
+- Code linting and auto-fixes with Ruff
+- Code formatting with Ruff
+- Trailing whitespace removal
+- End-of-file newline checks
+- YAML syntax validation
+
+You can also run the hooks manually on all files:
+
+```bash
+uv run prek run --all-files
+```
+
 ---
 
 Copyright 2026 Gauthier Jolly

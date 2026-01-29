@@ -1,0 +1,55 @@
+[project]
+name = "aws-k8s"
+version = "0.1.0"
+description = "Provision and manage Kubernetes clusters on AWS for inference workloads"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Gauthier Jolly"}
+]
+keywords = ["kubernetes", "k8s", "aws", "gpu", "cluster"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: System :: Clustering",
+    "Topic :: System :: Distributed Computing",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "boto3",
+    "paramiko",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "prek",
+]
+
+[project.scripts]
+provision-cluster = "aws_k8s.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatchling.build.targets.wheel]
+packages = ["src/aws-k8s"]
+
+[tool.hatchling.build.targets.wheel.package-data]
+"aws_k8s.user_data" = ["*.sh"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
