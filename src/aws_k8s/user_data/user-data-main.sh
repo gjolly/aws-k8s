@@ -53,6 +53,45 @@ EOF
 apt update
 apt -y install containerd.io
 
+# Detect and setup NVMe instance store if present
+NVME_DEVICE=""
+for device in /dev/nvme*n1; do
+    if [ -b "$device" ] && [ "$device" != "/dev/nvme0n1" ]; then
+        # Found a non-root NVMe device (instance store)
+        NVME_DEVICE="$device"
+        break
+    fi
+done
+
+if [ -n "$NVME_DEVICE" ]; then
+    echo "Found NVMe instance store: $NVME_DEVICE"
+
+    # Format the device
+    mkfs.ext4 -F "$NVME_DEVICE"
+
+    # Create mount point and mount
+    mkdir -p /mnt/instance-store
+    mount "$NVME_DEVICE" /mnt/instance-store
+
+    # Add to fstab for persistence across reboots (though instance store is ephemeral)
+    echo "$NVME_DEVICE /mnt/instance-store ext4 defaults,nofail 0 2" >> /etc/fstab
+
+    # Setup containerd to use instance store
+    mkdir -p /mnt/instance-store/containerd
+    systemctl stop containerd
+
+    # Move existing containerd data if any
+    if [ -d /var/lib/containerd ]; then
+        mv /var/lib/containerd/* /mnt/instance-store/containerd/ 2>/dev/null || true
+        rm -rf /var/lib/containerd
+    fi
+
+    # Create symlink
+    ln -s /mnt/instance-store/containerd /var/lib/containerd
+
+    echo "Configured containerd to use instance store at /mnt/instance-store/containerd"
+fi
+
 # configure containerd to use systemd cgroup driver
 
 containerd config default | tee /etc/containerd/config.toml

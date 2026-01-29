@@ -189,6 +189,16 @@ def launch_spot_instance(ec2, name, instance_type, subnet_id, sg_id, user_data, 
             "SubnetId": subnet_id,
             "SecurityGroupIds": [sg_id],
             "UserData": user_data_encoded,
+            "BlockDeviceMappings": [
+                {
+                    "DeviceName": "/dev/sda1",
+                    "Ebs": {
+                        "VolumeSize": 20,
+                        "VolumeType": "gp3",
+                        "DeleteOnTermination": True,
+                    },
+                }
+            ],
         },
     )
 
